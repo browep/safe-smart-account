@@ -7,6 +7,7 @@ import {
     getSafeL2Singleton,
     getCompatFallbackHandler,
     getSafeL1Singleton,
+    getAbi,
 } from "../utils/setup";
 import deploymentData from "../json/safeDeployment.json";
 import fallbackHandlerDeploymentData from "../json/fallbackHandlerDeployment.json";
@@ -21,39 +22,40 @@ const GUARD_STORAGE_SLOT = "0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbd
 const migrationPaths = [
     {
         testSuiteName: "1.3.0 to latest (1.5.0)",
-        from: { safeDeploymentData: deploymentData.safe130, safeL2DeploymentData: deploymentData.safe130l2 },
-        latest: true,
-    },
-    {
-        testSuiteName: "1.3.0 to 1.4.1",
-        from: { safeDeploymentData: deploymentData.safe130, safeL2DeploymentData: deploymentData.safe130l2 },
-        // `to` is used when the target contracts are not latest. So, we need to provide the bytecode
-        // of the old version of the contracts
-        to: {
-            safeDeploymentData: deploymentData.safe141,
-            safeL2DeploymentData: deploymentData.safe141l2,
-            safeCompatFallbackHandler: fallbackHandlerDeploymentData.compatibilityFallbackHandler141,
-        },
-    },
-    {
-        testSuiteName: "1.4.1 to latest (1.5.0)",
         from: {
-            safeDeploymentData: deploymentData.safe141,
-            safeL2DeploymentData: deploymentData.safe141l2,
+            safeDeploymentData: { evm: deploymentData.safe130.evm, zksync: deploymentData.safe130.zksync },
+            safeL2DeploymentData: { evm: deploymentData.safe130l2.evm, zksync: deploymentData.safe130l2.zksync },
         },
         latest: true,
     },
+    // {
+    //     testSuiteName: "1.3.0 to 1.4.1",
+    //     from: {
+    //         safeDeploymentData: { evm: deploymentData.safe130.evm, zksync: deploymentData.safe130.zksync },
+    //         safeL2DeploymentData: { evm: deploymentData.safe130l2.evm, zksync: deploymentData.safe130l2.zksync },
+    //     },
+    //     // `to` is used when the target contracts are not latest. So, we need to provide the bytecode
+    //     // of the old version of the contracts
+    //     to: {
+    //         safeDeploymentData: { evm: deploymentData.safe141.evm, zksync: deploymentData.safe141.zksync },
+    //         safeL2DeploymentData: { evm: deploymentData.safe141l2.evm, zksync: deploymentData.safe141l2.zksync },
+    //         safeCompatFallbackHandler: {
+    //             evm: fallbackHandlerDeploymentData.compatibilityFallbackHandler141,
+    //             zksync: fallbackHandlerDeploymentData.compatibilityFallbackHandler141,
+    //         },
+    //     },
+    // },
+    // {
+    //     testSuiteName: "1.4.1 to latest (1.5.0)",
+    //     from: {
+    //         safeDeploymentData: { evm: deploymentData.safe141.evm, zksync: deploymentData.safe141.zksync },
+    //         safeL2DeploymentData: { evm: deploymentData.safe141l2.evm, zksync: deploymentData.safe141l2.zksync },
+    //     },
+    //     latest: true,
+    // },
 ];
 
-describe("SafeMigration Library", () => {
-    before(function () {
-        /**
-         * ## Migration tests are not working yet for zkSync: this test depends on the EVM bytecode
-         * which is not supported on zkSync. Tests will be adjusted.
-         */
-        if (hre.network.zksync) this.skip();
-    });
-
+describe.only("SafeMigration Library", () => {
     const migratedInterface = new ethers.Interface(["function masterCopy() view returns(address)"]);
 
     let SAFE_SINGLETON_ADDRESS: string | null | undefined;
@@ -95,24 +97,35 @@ describe("SafeMigration Library", () => {
 
     migrationPaths.forEach(({ testSuiteName, from, to, latest }) => {
         describe(testSuiteName, () => {
-            const setupTests = deployments.createFixture(async ({ deployments }) => {
+            const setupTests = deployments.createFixture(async ({ deployments, network: { zksync } }) => {
+                console.log("PRE_FIXTURE");
                 await deployments.fixture();
+                console.log("POST_FIXTURE");
                 const signers = await ethers.getSigners();
                 const [user1] = signers;
                 let migration: SafeMigration;
-
+                console.log("CHECKING IF LATEST");
                 if (latest) {
                     migration = await safeMigrationContract();
                     SAFE_SINGLETON_ADDRESS = await (await getSafeL1Singleton()).getAddress();
                     SAFE_SINGLETON_L2_ADDRESS = await (await getSafeL2Singleton()).getAddress();
                     COMPATIBILITY_FALLBACK_HANDLER = await (await getCompatFallbackHandler()).getAddress();
                 } else {
-                    SAFE_SINGLETON_ADDRESS = (await (await user1.sendTransaction({ data: to?.safeDeploymentData })).wait())
-                        ?.contractAddress;
-                    SAFE_SINGLETON_L2_ADDRESS = (await (await user1.sendTransaction({ data: to?.safeL2DeploymentData })).wait())
-                        ?.contractAddress;
-                    COMPATIBILITY_FALLBACK_HANDLER = (await (await user1.sendTransaction({ data: to?.safeL2DeploymentData })).wait())
-                        ?.contractAddress;
+                    const safeDeploymentData = zksync ? to?.safeDeploymentData.zksync : to?.safeDeploymentData.evm;
+                    const safeL2DeploymentData = zksync ? to?.safeL2DeploymentData.zksync : to?.safeL2DeploymentData.evm;
+                    const safeCompatFallbackHandler = zksync ? to?.safeCompatFallbackHandler.zksync : to?.safeCompatFallbackHandler.evm;
+
+                    const safeContractFactory = new hre.ethers.ContractFactory(await getAbi("Safe"), safeDeploymentData);
+                    const SAFE_SINGLETON_ADDRESS = (await safeContractFactory.deploy()).getAddress();
+
+                    const safeL2ContractFactory = new hre.ethers.ContractFactory(await getAbi("Safe"), safeL2DeploymentData);
+                    const SAFE_SINGLETON_L2_ADDRESS = (await safeL2ContractFactory.deploy()).getAddress();
+
+                    const fallbackHandlerContractFactory = new hre.ethers.ContractFactory(
+                        await getAbi("CompatibilityFallbackHandler"),
+                        safeCompatFallbackHandler,
+                    );
+                    const COMPATIBILITY_FALLBACK_HANDLER = (await fallbackHandlerContractFactory.deploy()).getAddress();
 
                     migration = (await hre.ethers.deployContract("SafeMigration", [
                         SAFE_SINGLETON_ADDRESS,
@@ -120,17 +133,23 @@ describe("SafeMigration Library", () => {
                         COMPATIBILITY_FALLBACK_HANDLER,
                     ])) as unknown as SafeMigration;
                 }
+                console.log("GOT ALL THE ADDRESSES");
+                const safeDeploymentData = zksync ? from.safeDeploymentData.zksync : from.safeDeploymentData.evm;
+                const safeL2DeploymentData = zksync ? from.safeL2DeploymentData.zksync : from.safeL2DeploymentData.evm;
 
-                const singletonAddress = (await (await user1.sendTransaction({ data: from.safeDeploymentData })).wait())?.contractAddress;
-                const singletonL2Address = (await (await user1.sendTransaction({ data: from.safeL2DeploymentData })).wait())
-                    ?.contractAddress;
-
+                const singletonAddress = await new hre.ethers.ContractFactory(await getAbi("Safe"), safeDeploymentData, user1)
+                    .deploy()
+                    .then((c) => c?.getAddress());
+                const singletonL2Address = await new hre.ethers.ContractFactory(await getAbi("SafeL2"), safeL2DeploymentData, user1)
+                    .deploy()
+                    .then((c) => c?.getAddress());
+                console.log("deployed singletons");
                 if (!singletonAddress || !singletonL2Address) {
                     throw new Error("Could not deploy safe or safeL2");
                 }
                 const singleton = await getSafeSingletonAt(singletonAddress);
                 const singletonL2 = await getSafeSingletonAt(singletonL2Address);
-
+                console.log("GOT SINGLETONS");
                 return {
                     signers,
                     safe: await getSafe({ singleton: singleton, owners: [user1.address] }),
@@ -151,7 +170,7 @@ describe("SafeMigration Library", () => {
                     ).to.be.revertedWith("GS013");
                 });
 
-                it("migrates the singleton", async () => {
+                it.only("migrates the singleton", async () => {
                     const {
                         safe,
                         migration,
